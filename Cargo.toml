@@ -1,0 +1,12 @@
+[package]
+name = "chefctl"
+version = "0.1.0"
+authors = ["Dan Sedlacek <dansedlacek@fb.com>"]
+edition = "2018"
+
+[dependencies]
+actix-web = "~0.7"
+chrono = "~0.4.6"
+clap = "~2.32.0"
+lazy_static = "~1.2.0"
+rand = "~0.6.1"
