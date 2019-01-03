@@ -11,7 +11,5 @@ pub fn start_api_server(addr: &str) -> std::io::Result<()> {
 }
 
 pub fn index(_req: &HttpRequest) -> String {
-    let state = crate::state::APP_STATE.peek();
-
-    format!("{:?}\n", state).to_string()
+    format!("{:?}\n", &*crate::state::APP_STATE).to_string()
 }

@@ -3,16 +3,20 @@ extern crate chefctl;
 extern crate clap;
 #[macro_use]
 extern crate lazy_static;
+extern crate ctrlc;
 
 use chefctl::{
     api::start_api_server,
-    platform::{CHEF_RUN_CURRENT_PATH, CONFIG_FILE_PATH, LOCK_FILE_PATH},
+    platform::{CONFIG_FILE_PATH, LOCK_FILE_PATH},
     process::ChefClientArgs,
-    symlink::with_symlink,
     VERSION,
 };
 use clap::Arg;
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicBool, Ordering},
+    sync::Arc,
+};
 
 lazy_static! {
     static ref APP_TO_CHEF: HashMap<&'static str, &'static str> = {
@@ -24,9 +28,26 @@ lazy_static! {
         v.insert("lock-timeout", "--run-lock-timeout");
         v.insert("splay", "--splay");
         v.insert("why-run", "--why-run");
+        v.insert("human", "-l auto");
 
         v
     };
+}
+
+fn handle_signals() {
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+
+    ctrlc::set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+    })
+    .expect("error setting up signal trap");
+
+    while running.load(Ordering::SeqCst) {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    println!("SIGINT received");
+    std::process::exit(1);
 }
 
 fn args_from_clap(matches: clap::ArgMatches) -> String {
@@ -45,11 +66,16 @@ fn args_from_clap(matches: clap::ArgMatches) -> String {
     }
 
     opts.insert("--no-fork");
+    opts.insert("--force-formatter");
+
+    // For some reason chef-client still double logs and I have to do this :(
+    opts.insert("-L /dev/null");
 
     opts.into()
 }
 
-fn main() {
+fn main() -> Result<(), std::io::Error> {
+    // Start REST API server.
     std::thread::spawn(|| {
         start_api_server("127.0.0.1:6666")
             .map_err(|e| {
@@ -59,6 +85,9 @@ fn main() {
             })
             .expect("api creation failed, exiting");
     });
+
+    // This is currently the best Rust has to offer for signal handling.
+    std::thread::spawn(handle_signals);
 
     let args = args_from_clap(
         clap::App::new("chefctl")
@@ -122,13 +151,22 @@ fn main() {
             )
             .get_matches(),
     );
-    println!("constructed: {}", &args);
-    with_symlink(CHEF_RUN_CURRENT_PATH, move || {
-        let chef_run = chefctl::process::create(args.clone());
 
-        let chef_run = chef_run.run();
-        let chef_run = chef_run.run();
-        let _chef_run = chef_run.run();
-    });
+    let mut state_machine = chefctl::process::create(args.clone());
+    loop {
+        state_machine = state_machine.run();
+        match state_machine {
+            chefctl::process::State::PostRun(e) => {
+                println!("chef process state completed with exit code {}", e);
+                break;
+            }
+            _ => {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                std::thread::yield_now();
+            }
+        };
+    }
     println!("chefctl done");
+
+    Ok(())
 }
