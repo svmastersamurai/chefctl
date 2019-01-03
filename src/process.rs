@@ -1,8 +1,11 @@
 use crate::platform::CHEF_PATH;
+use crate::state::APP_STATE;
 use rand::{thread_rng, Rng};
 use std::cell::RefCell;
+use std::fmt::Display;
 use std::fs::File;
-use std::io::{BufReader, Cursor, Read, Write};
+use std::io::BufRead;
+use std::io::{BufReader, Write};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
@@ -10,7 +13,7 @@ pub fn splay(max: u32) -> Duration {
     Duration::from_secs(thread_rng().gen_range(0, max).into())
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ChefClientArgs {
     cmd: Vec<String>,
 }
@@ -81,140 +84,15 @@ where
     State::PreRun(inner)
 }
 
-#[derive(Debug)]
-struct LogCursor(Cursor<Vec<u8>>);
-
-impl LogCursor {
-    pub fn clear(&mut self) {
-        self.0.get_mut().clear();
-    }
-
-    pub fn get_mut(&mut self) -> &mut [u8] {
-        self.as_mut()
-    }
-
-    pub fn get_ref(&self) -> &[u8] {
-        self.as_ref()
-    }
-}
-
-impl AsMut<[u8]> for LogCursor {
-    fn as_mut(&mut self) -> &mut [u8] {
-        self.0.get_mut().as_mut_slice()
-    }
-}
-
-impl AsRef<[u8]> for LogCursor {
-    fn as_ref(&self) -> &[u8] {
-        self.0.get_ref().as_slice()
-    }
-}
-
-#[derive(Debug)]
-enum IoHandle {
-    Stdout(std::io::Stdout),
-    Stderr(std::io::Stderr),
-}
-
-#[derive(Debug)]
-enum IoHandleLocks<'a> {
-    Stdout(Box<std::io::StdoutLock<'a>>),
-    Stderr(Box<std::io::StderrLock<'a>>),
-}
-
-impl<'a> Write for IoHandleLocks<'a> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        match self {
-            IoHandleLocks::Stderr(s) => s.write(buf),
-            IoHandleLocks::Stdout(s) => s.write(buf),
-        }
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        match self {
-            IoHandleLocks::Stderr(s) => s.flush(),
-            IoHandleLocks::Stdout(s) => s.flush(),
-        }
-    }
-}
-
-fn filter_nulls(buf: &[u8]) -> Vec<u8> {
-    buf.iter()
-        .filter(|i| **i != 0 as u8)
-        .cloned()
-        .collect()
-}
-
-// `pump` will take a standard I/O stream and then pump its contents into both
-// the log file and the console.
-fn pump<T>(mut fd: T, handle: IoHandle)
-where
-    T: Read,
-{
-    let mut log_file = match File::create(crate::platform::CHEF_RUN_CURRENT_PATH) {
-        Ok(h) => h,
-        Err(e) => panic!("error: {}", e),
-    };
-    let mut buf = vec![0 as u8; 8192];
-
-    // These handles will be refreshed elsewhere in the loop as needed.
-    // Is there a way to only allocate one???
-    let mut stdout = std::io::stdout();
-    let mut stderr = std::io::stderr();
-
-    loop {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        let mut l = match &handle {
-            IoHandle::Stdout(_) => {
-                stdout = std::io::stdout();
-                IoHandleLocks::Stdout(Box::new(stdout.lock()))
-            }
-            IoHandle::Stderr(_) => {
-                stderr = std::io::stderr();
-                IoHandleLocks::Stderr(Box::new(stderr.lock()))
-            }
-        };
-
-        match fd.read(&mut buf) {
-            Ok(0) => {
-                let no_nulls = filter_nulls(&buf);
-                match log_file.write(&no_nulls) {
-                    Ok(0) => {}
-                    Ok(b) => println!("log flushed {} bytes", b),
-                    Err(e) => panic!("could not flush to chef.cur.out: {}", e),
-                };
-                match l.write(&no_nulls) {
-                    Ok(0) => {}
-                    Ok(b) => println!("stdout flushed {} bytes", b),
-                    Err(e) => panic!("could not flush to stdout: {}", e),
-                };
-                break;
-            }
-            Ok(_) => {
-                let no_nulls = filter_nulls(&buf);
-                match log_file.write(&no_nulls) {
-                    Ok(0) => {}
-                    Ok(b) => println!("log wrote {} bytes", b),
-                    Err(e) => panic!("could not write to chef.cur.out: {}", e),
-                };
-                match l.write(&no_nulls) {
-                    Ok(0) => {}
-                    Ok(b) => println!("stdout wrote {} bytes", b),
-                    Err(e) => panic!("could not write to stdout: {}", e),
-                };
-            }
-            Err(e) => eprintln!("{}", e),
-        };
-    }
-}
-
 impl State {
     pub fn run(self) -> State {
         match self {
             State::PreRun(s) => {
                 println!("chef pre-run");
+                let mut transition = State::Running(s.inner.borrow_mut().spawn().unwrap());
+                let _ = APP_STATE.update_process_state(&mut transition);
 
-                State::Running(s.inner.borrow_mut().spawn().unwrap())
+                transition
             }
             State::Running(mut s) => {
                 println!("chef run");
@@ -223,22 +101,57 @@ impl State {
                     Some(s) => s,
                     None => panic!("no handle to stdout :("),
                 };
-                let stdout = std::io::stdout();
-                let buffered_stdout = BufReader::new(stdout_handle);
-                std::thread::spawn(move || pump(buffered_stdout, IoHandle::Stdout(stdout)));
+                let mut stdout = std::io::stdout();
+                let mut buffered_stdout = BufReader::new(stdout_handle);
+                std::thread::spawn(move || {
+                    stdout.lock();
+                    let mut log_file = match File::create(crate::platform::CHEF_RUN_CURRENT_PATH) {
+                        Ok(h) => h,
+                        Err(e) => panic!("error: {}", e),
+                    };
+                    let mut buf = String::new();
 
-                // let stderr_handle = match s.stderr.take() {
-                //     Some(s) => s,
-                //     None => panic!("no handle to stderr"),
-                // };
-                // let stderr = std::io::stderr();
-                // let buffered_stderr = BufReader::new(stderr_handle);
-                // std::thread::spawn(move || pump(buffered_stderr, IoHandle::Stderr(stderr)));
+                    loop {
+                        match buffered_stdout.read_line(&mut buf) {
+                            Ok(0) => {
+                                match log_file.write(buf.as_bytes()) {
+                                    Ok(0) => {}
+                                    Ok(b) => println!("log flushed {} bytes", b),
+                                    Err(e) => panic!("could not flush to chef.cur.out: {}", e),
+                                };
+                                match stdout.write(buf.as_bytes()) {
+                                    Ok(0) => {}
+                                    Ok(b) => println!("stdout flushed {} bytes", b),
+                                    Err(e) => panic!("could not flush to stdout: {}", e),
+                                };
+                                break;
+                            }
+                            Ok(_) => {
+                                let b = buf.to_owned();
+                                buf.clear();
+                                match log_file.write(b.as_bytes()) {
+                                    Ok(0) => {}
+                                    Ok(b) => println!("log wrote {} bytes", b),
+                                    Err(e) => panic!("could not write to chef.cur.out: {}", e),
+                                };
+                                match stdout.write(b.as_bytes()) {
+                                    Ok(0) => {}
+                                    Ok(b) => println!("stdout wrote {} bytes", b),
+                                    Err(e) => panic!("could not write to stdout: {}", e),
+                                };
+                            }
+                            Err(e) => eprintln!("{}", e),
+                        };
+                    }
+                });
 
                 loop {
                     if let Ok(s) = s.try_wait() {
                         if let Some(p) = s {
-                            return State::PostRun(p);
+                            let mut transition = State::PostRun(p);
+                            let _ = APP_STATE.update_process_state(&mut transition);
+
+                            return transition;
                         }
                     }
 
@@ -255,6 +168,18 @@ impl State {
                 State::PostRun(s)
             }
         }
+    }
+}
+
+impl Display for State {
+    fn fmt(&self, w: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let my_type = match self {
+            State::PreRun(_) => "PreRun",
+            State::Running(_) => "Running",
+            State::PostRun(_) => "PostRun",
+        };
+
+        write!(w, "State({})", my_type)
     }
 }
 

@@ -1,9 +1,6 @@
-#![feature(generators, generator_trait)]
-
 extern crate chrono;
 
-use crate::platform::CHEF_RUN_CURRENT_PATH;
-use chrono::prelude::*;
+use chrono::prelude::{DateTime, Datelike, Local, Timelike};
 use std::ops::{Generator, GeneratorState};
 use std::path::PathBuf;
 

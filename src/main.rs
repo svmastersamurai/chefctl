@@ -44,6 +44,8 @@ fn args_from_clap(matches: clap::ArgMatches) -> String {
         }
     }
 
+    opts.insert("--no-fork");
+
     opts.into()
 }
 

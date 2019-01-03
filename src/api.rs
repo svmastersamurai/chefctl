@@ -10,6 +10,8 @@ pub fn start_api_server(addr: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-pub fn index(_req: &HttpRequest) -> &'static str {
-    "Hello world!"
+pub fn index(_req: &HttpRequest) -> String {
+    let state = crate::state::APP_STATE.peek();
+
+    format!("{:?}\n", state).to_string()
 }
