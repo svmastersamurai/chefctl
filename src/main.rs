@@ -126,7 +126,7 @@ fn main() {
 
         let chef_run = chef_run.run();
         let chef_run = chef_run.run();
-        let chef_run = chef_run.run();
+        let _chef_run = chef_run.run();
     });
     println!("chefctl done");
 }

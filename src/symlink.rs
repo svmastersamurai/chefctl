@@ -55,12 +55,10 @@ fn output_path() -> String {
     // let p: PathBuf = ["/", "var", "chef", "outputs", file_name.as_str()]
     //     .iter()
     //     .collect();
-    let p: PathBuf = ["/", "tmp", file_name.as_str()]
-        .iter()
-        .collect();
+    let p: PathBuf = ["/", "tmp", file_name.as_str()].iter().collect();
 
     match p.to_str() {
-        Some(p) => p.to_owned().into(),
+        Some(p) => p.to_owned(),
         None => panic!("wtf"),
     }
 }
@@ -109,10 +107,12 @@ where
     }
 }
 
-
 // Validates that the directory structure needed for the file about to be written
 // exists.
-fn ensure_path<P>(p: P) where PathBuf: From<P> {
+fn ensure_path<P>(p: P)
+where
+    PathBuf: From<P>,
+{
     let path = PathBuf::from(p);
 
     if !path.parent().unwrap().exists() {

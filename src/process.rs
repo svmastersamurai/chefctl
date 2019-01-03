@@ -1,10 +1,10 @@
 use crate::platform::CHEF_PATH;
 use rand::{thread_rng, Rng};
 use std::cell::RefCell;
+use std::fs::File;
+use std::io::{BufReader, Cursor, Read, Write};
 use std::process::{Command, Stdio};
 use std::time::Duration;
-use std::fs::File;
-use std::io::{Read, BufReader, Write, Cursor};
 
 pub fn splay(max: u32) -> Duration {
     Duration::from_secs(thread_rng().gen_range(0, max).into())
@@ -116,19 +116,10 @@ enum IoHandle {
     Stderr(std::io::Stderr),
 }
 
-impl IoHandle {
-    fn lock(&self) -> IoHandleLocks {
-        match self {
-            IoHandle::Stdout(s) => IoHandleLocks::Stdout(s.lock()),
-            IoHandle::Stderr(s) => IoHandleLocks::Stderr(s.lock()),
-        }
-    }
-}
-
 #[derive(Debug)]
 enum IoHandleLocks<'a> {
-    Stdout(std::io::StdoutLock<'a>),
-    Stderr(std::io::StderrLock<'a>),
+    Stdout(Box<std::io::StdoutLock<'a>>),
+    Stderr(Box<std::io::StderrLock<'a>>),
 }
 
 impl<'a> Write for IoHandleLocks<'a> {
@@ -147,31 +138,70 @@ impl<'a> Write for IoHandleLocks<'a> {
     }
 }
 
+fn filter_nulls(buf: &[u8]) -> Vec<u8> {
+    buf.iter()
+        .filter(|i| **i != 0 as u8)
+        .cloned()
+        .collect()
+}
+
 // `pump` will take a standard I/O stream and then pump its contents into both
 // the log file and the console.
-fn pump<T>(mut fd: T, handle: IoHandle) where T: Read {
+fn pump<T>(mut fd: T, handle: IoHandle)
+where
+    T: Read,
+{
     let mut log_file = match File::create(crate::platform::CHEF_RUN_CURRENT_PATH) {
         Ok(h) => h,
         Err(e) => panic!("error: {}", e),
     };
-    let mut l = handle.lock();
-    let mut buf = LogCursor(std::io::Cursor::new(Vec::new()));
+    let mut buf = vec![0 as u8; 8192];
+
+    // These handles will be refreshed elsewhere in the loop as needed.
+    // Is there a way to only allocate one???
+    let mut stdout = std::io::stdout();
+    let mut stderr = std::io::stderr();
 
     loop {
-        match fd.read(&mut buf.get_mut()) {
-            Ok(0) => { break }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let mut l = match &handle {
+            IoHandle::Stdout(_) => {
+                stdout = std::io::stdout();
+                IoHandleLocks::Stdout(Box::new(stdout.lock()))
+            }
+            IoHandle::Stderr(_) => {
+                stderr = std::io::stderr();
+                IoHandleLocks::Stderr(Box::new(stderr.lock()))
+            }
+        };
+
+        match fd.read(&mut buf) {
+            Ok(0) => {
+                let no_nulls = filter_nulls(&buf);
+                match log_file.write(&no_nulls) {
+                    Ok(0) => {}
+                    Ok(b) => println!("log flushed {} bytes", b),
+                    Err(e) => panic!("could not flush to chef.cur.out: {}", e),
+                };
+                match l.write(&no_nulls) {
+                    Ok(0) => {}
+                    Ok(b) => println!("stdout flushed {} bytes", b),
+                    Err(e) => panic!("could not flush to stdout: {}", e),
+                };
+                break;
+            }
             Ok(_) => {
-                match log_file.write(buf.get_ref()) {
+                let no_nulls = filter_nulls(&buf);
+                match log_file.write(&no_nulls) {
                     Ok(0) => {}
-                    Ok(b) => println!("log flushed {}", b),
-                    Err(e) => panic!("could not write to chef.cur.out: {}", e)
+                    Ok(b) => println!("log wrote {} bytes", b),
+                    Err(e) => panic!("could not write to chef.cur.out: {}", e),
                 };
-                match l.write(buf.get_ref()) {
+                match l.write(&no_nulls) {
                     Ok(0) => {}
-                    Ok(b) => println!("stdout flushed {}", b),
-                    Err(e) => panic!("could not write to stdout: {}", e)
+                    Ok(b) => println!("stdout wrote {} bytes", b),
+                    Err(e) => panic!("could not write to stdout: {}", e),
                 };
-                &buf.clear();
             }
             Err(e) => eprintln!("{}", e),
         };
@@ -197,24 +227,20 @@ impl State {
                 let buffered_stdout = BufReader::new(stdout_handle);
                 std::thread::spawn(move || pump(buffered_stdout, IoHandle::Stdout(stdout)));
 
-                let stderr_handle = match s.stderr.take() {
-                    Some(s) => s,
-                    None => panic!("no handle to stderr"),
-                };
-                let stderr = std::io::stderr();
-                let buffered_stderr = BufReader::new(stderr_handle);
-                std::thread::spawn(move || pump(buffered_stderr, IoHandle::Stderr(stderr)));
+                // let stderr_handle = match s.stderr.take() {
+                //     Some(s) => s,
+                //     None => panic!("no handle to stderr"),
+                // };
+                // let stderr = std::io::stderr();
+                // let buffered_stderr = BufReader::new(stderr_handle);
+                // std::thread::spawn(move || pump(buffered_stderr, IoHandle::Stderr(stderr)));
 
                 loop {
-                    match s.try_wait() {
-                        Ok(s) => match s {
-                            Some(p) => {
-                                return State::PostRun(p);
-                            }
-                            _ => (),
-                        },
-                        _ => (),
-                    };
+                    if let Ok(s) = s.try_wait() {
+                        if let Some(p) = s {
+                            return State::PostRun(p);
+                        }
+                    }
 
                     // Pump stdout/stderr into the file.
                     println!("waiting for process to finish");
