@@ -8,7 +8,7 @@ extern crate ctrlc;
 use chefctl::{
     api::start_api_server,
     platform::{CONFIG_FILE_PATH, LOCK_FILE_PATH},
-    process::ChefClientArgs,
+    process::{ChefClientArgs, PostRun, PreRun, Running, Waiting},
     VERSION,
 };
 use clap::Arg;
@@ -152,20 +152,12 @@ fn main() -> Result<(), std::io::Error> {
             .get_matches(),
     );
 
-    let mut state_machine = chefctl::process::create(args.clone());
-    loop {
-        state_machine = state_machine.run();
-        match state_machine {
-            chefctl::process::State::PostRun(e) => {
-                println!("chef process state completed with exit code {}", e);
-                break;
-            }
-            _ => {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                std::thread::yield_now();
-            }
-        };
-    }
+    // Run the state machine.
+    let pre_run = chefctl::process::StateMachine::<PreRun>::new(args.into());
+    let waiting = chefctl::process::StateMachine::<Waiting>::from(pre_run);
+    let running = chefctl::process::StateMachine::<Running>::from(waiting);
+    let _done = chefctl::process::StateMachine::<PostRun>::from(running);
+
     println!("chefctl done");
 
     Ok(())

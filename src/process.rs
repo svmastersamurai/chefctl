@@ -10,6 +10,7 @@ use std::{
     fmt::Display,
     fs::OpenOptions,
     io::{BufRead, BufReader, Write},
+    ops::DerefMut,
     path::PathBuf,
     process::{Command, Stdio},
     rc::Rc,
@@ -106,18 +107,18 @@ where
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 // Represents a handle to the chef process to-be-launched on the client.
 pub struct ChefProcess {
-    inner: Rc<RefCell<Box<Command>>>,
-    child: Option<Result<Rc<RefCell<std::process::Child>>, std::process::ExitStatus>>,
+    inner: RefCell<Box<Command>>,
+    child: Option<Result<RefCell<std::process::Child>, std::process::ExitStatus>>,
 }
 
 impl ChefProcess {
     // Creates the local process but does not execute it yet. The initial
     // bookkeeping is to setup the piped `stderr` and `stdout` so output can be
     // logged to both the console as well as a log file.
-    pub fn new(cmd: &str) -> Self {
+    pub fn new(cmd: String) -> Self {
         let v: Vec<_> = cmd.split(' ').collect();
         let absolute_path: String = String::from(v[0]);
         let args = &v[1..];
@@ -127,7 +128,7 @@ impl ChefProcess {
         cmd_line.stdout(Stdio::piped());
         cmd_line.stderr(Stdio::piped());
 
-        let inner = Rc::new(RefCell::new(Box::new(cmd_line)));
+        let inner = RefCell::new(Box::new(cmd_line));
 
         Self { inner, child: None }
     }
@@ -141,191 +142,236 @@ impl ChefProcess {
 //      Running - The `chef-client` process is executed. Logs are piped to disk.
 //      PostRun - `chef-client` has finished execution and will bubble up the
 //                exit code.
-pub enum State {
-    PreRun(ChefProcess),
-    Waiting(ChefProcess, Duration),
-    Running(std::process::Child),
-    PostRun(std::process::ExitStatus),
+pub struct StateMachine<S> {
+    state: S,
 }
 
-pub fn create<T>(cmd: T) -> State
-where
-    T: Into<String>,
-{
-    let inner = ChefProcess::new(&cmd.into());
-
-    State::PreRun(inner)
-}
-
-impl State {
-    pub fn run(self) -> State {
-        match self {
-            State::PreRun(s) => {
-                println!("chef pre-run");
-                let chef_cur_out = &String::from(CHEF_RUN_CURRENT_PATH);
-                let chef_prev_out = &String::from(CHEF_RUN_LAST_PATH);
-                let prev_path = match std::fs::read_link(CHEF_RUN_CURRENT_PATH) {
-                    Ok(s) => Some(s),
-                    Err(_) => None,
-                };
-
-                if let Some(p) = prev_path {
-                    if p.to_str().unwrap() != chef_prev_out {
-                        let update_symlink = &String::from(p.to_str().unwrap());
-
-                        let _ = create_symlink(chef_prev_out, update_symlink);
-                    }
-                }
-                let _ = create_symlink(chef_cur_out, &output_path());
-
-                let duration = splay(10);
-                let mut transition = State::Waiting(s, duration);
-                let _ = APP_STATE.update_process_state(&mut transition);
-
-                transition
-            }
-            State::Waiting(s, t) => {
-                let one_sec = Duration::from_secs(1);
-                let (tx, rx) = std::sync::mpsc::channel::<u64>();
-                let _ = std::thread::Builder::new()
-                    .name("ticker-tx".into())
-                    .spawn(move || loop {
-                        let _ = tx.send(1);
-                        std::thread::sleep(one_sec);
-                    });
-
-                let mut countdown = t.as_secs();
-                while let Ok(_) = rx.recv() {
-                    if countdown > 0 {
-                        countdown -= 1;
-                        APP_STATE.update_splay_countdown(countdown);
-                    } else {
-                        break;
-                    }
-                    std::thread::sleep(one_sec);
-                }
-                let mut transition = State::Running(s.inner.borrow_mut().spawn().unwrap());
-                let _ = APP_STATE.update_process_state(&mut transition);
-
-                transition
-            }
-            State::Running(mut s) => {
-                let stdout_handle = match s.stdout.take() {
-                    Some(s) => s,
-                    None => panic!("no handle to stdout :("),
-                };
-                let mut stdout = std::io::stdout();
-                let mut buffered_stdout = BufReader::new(stdout_handle);
-
-                // This thead will pump all of the data from the process' stdout
-                // handle into the log as well as the console.
-                std::thread::spawn(move || {
-                    stdout.lock();
-                    let mut log_file = match OpenOptions::new()
-                        .append(true)
-                        .create(true)
-                        .open(crate::platform::CHEF_RUN_CURRENT_PATH)
-                    {
-                        Ok(h) => h,
-                        Err(e) => panic!("error: {}", e),
-                    };
-                    let mut buf = String::new();
-
-                    loop {
-                        match buffered_stdout.read_line(&mut buf) {
-                            Ok(_) => {
-                                let b = buf.to_owned();
-                                buf.clear();
-                                match log_file.write(b.as_bytes()) {
-                                    Ok(_) => {}
-                                    Err(e) => panic!("could not write to chef.cur.out: {}", e),
-                                };
-                                match stdout.write(b.as_bytes()) {
-                                    Ok(_) => {}
-                                    Err(e) => panic!("could not write to stdout: {}", e),
-                                };
-                            }
-                            Err(e) => eprintln!("{}", e),
-                        };
-                    }
-                });
-
-                let stderr_handle = match s.stderr.take() {
-                    Some(s) => s,
-                    None => panic!("no handle to stdout :("),
-                };
-                let mut stderr = std::io::stderr();
-                let mut buffered_stderr = BufReader::new(stderr_handle);
-
-                // This thead will pump all of the data from the process' stdout
-                // handle into the log as well as the console.
-                std::thread::spawn(move || {
-                    stderr.lock();
-                    let mut log_file = match OpenOptions::new()
-                        .append(true)
-                        .create(false)
-                        .open(crate::platform::CHEF_RUN_CURRENT_PATH)
-                    {
-                        Ok(h) => h,
-                        Err(e) => panic!("error: {}", e),
-                    };
-                    let mut buf = String::new();
-
-                    loop {
-                        match buffered_stderr.read_line(&mut buf) {
-                            Ok(_) => {
-                                let b = buf.to_owned();
-                                buf.clear();
-                                match log_file.write(b.as_bytes()) {
-                                    Ok(_) => {}
-                                    Err(e) => panic!("could not write to chef.cur.out: {}", e),
-                                };
-                                match stderr.write(b.as_bytes()) {
-                                    Ok(_) => {}
-                                    Err(e) => panic!("could not write to stdout: {}", e),
-                                };
-                            }
-                            Err(e) => eprintln!("{}", e),
-                        };
-                    }
-                });
-
-                // This loop will run until the process completes and returns an
-                // exit code.
-                // TODO: Handle interrupt signals.
-                loop {
-                    if let Ok(s) = s.try_wait() {
-                        if let Some(p) = s {
-                            let mut transition = State::PostRun(p);
-                            let _ = APP_STATE.update_process_state(&mut transition);
-
-                            return transition;
-                        }
-                    }
-                    std::thread::sleep(Duration::from_millis(500));
-                }
-            }
-            State::PostRun(s) => {
-                println!("chef post-run");
-
-                println!("chef-client exited with {}", s.code().unwrap());
-
-                State::PostRun(s)
-            }
+impl StateMachine<PreRun> {
+    pub fn new(val: String) -> Self {
+        Self {
+            state: PreRun::new(val),
         }
     }
 }
 
-impl Display for State {
-    fn fmt(&self, w: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let my_type = match self {
-            State::PreRun(_) => "PreRun",
-            State::Waiting(..) => "Waiting",
-            State::Running(_) => "Running",
-            State::PostRun(_) => "PostRun",
+#[derive(Debug)]
+pub struct PreRun {
+    process: ChefProcess,
+}
+
+impl PreRun {
+    fn new(val: String) -> Self {
+        let process = ChefProcess::new(val);
+        Self { process }
+    }
+}
+
+impl From<StateMachine<PreRun>> for StateMachine<Waiting> {
+    fn from(val: StateMachine<PreRun>) -> StateMachine<Waiting> {
+        println!("chef pre-run");
+        let chef_cur_out = &String::from(CHEF_RUN_CURRENT_PATH);
+        let chef_prev_out = &String::from(CHEF_RUN_LAST_PATH);
+        let prev_path = match std::fs::read_link(CHEF_RUN_CURRENT_PATH) {
+            Ok(s) => Some(s),
+            Err(_) => None,
         };
 
-        write!(w, "ChefProcessState({})", my_type)
+        if let Some(p) = prev_path {
+            if p.to_str().unwrap() != chef_prev_out {
+                let update_symlink = &String::from(p.to_str().unwrap());
+
+                let _ = create_symlink(chef_prev_out, update_symlink);
+            }
+        }
+        let _ = create_symlink(chef_cur_out, &output_path());
+        let duration = splay(10);
+
+        StateMachine {
+            state: Waiting {
+                process: val.state.process,
+                splay: duration,
+            },
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Waiting {
+    process: ChefProcess,
+    splay: Duration,
+}
+
+impl Waiting {
+    fn new(process: ChefProcess, splay: Duration) -> Self {
+        Self { process, splay }
+    }
+
+    pub fn spawn(&mut self) -> std::process::Child {
+        self.process.inner.borrow_mut().spawn().unwrap()
+    }
+}
+
+impl From<StateMachine<Waiting>> for StateMachine<Running> {
+    fn from(mut val: StateMachine<Waiting>) -> StateMachine<Running> {
+        let one_sec = Duration::from_secs(1);
+        let (tx, rx) = std::sync::mpsc::channel::<u64>();
+        let _ = std::thread::Builder::new()
+            .name("ticker-tx".into())
+            .spawn(move || loop {
+                let _ = tx.send(1);
+                std::thread::sleep(one_sec);
+            });
+
+        let mut countdown = val.state.splay.as_secs();
+        while let Ok(_) = rx.recv() {
+            if countdown > 0 {
+                countdown -= 1;
+                APP_STATE.update_splay_countdown(countdown);
+            } else {
+                break;
+            }
+            std::thread::sleep(one_sec);
+        }
+
+        StateMachine {
+            state: Running {
+                child: val.state.spawn(),
+            },
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct Running {
+    child: std::process::Child,
+}
+
+impl Running {
+    fn new(child: std::process::Child) -> Self {
+        Self { child }
+    }
+
+    pub fn pump_stdout(&mut self) -> std::io::Result<()> {
+        let stdout_handle = match self.child.stdout.take() {
+            Some(s) => s,
+            None => panic!("no handle to stdout :("),
+        };
+        let mut stdout = std::io::stdout();
+        let mut buffered_stdout = BufReader::new(stdout_handle);
+
+        // This thead will pump all of the data from the process' stdout
+        // handle into the log as well as the console.
+        std::thread::spawn(move || {
+            stdout.lock();
+            let mut log_file = match OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(crate::platform::CHEF_RUN_CURRENT_PATH)
+            {
+                Ok(h) => h,
+                Err(e) => panic!("error: {}", e),
+            };
+            let mut buf = String::new();
+
+            loop {
+                match buffered_stdout.read_line(&mut buf) {
+                    Ok(_) => {
+                        let b = buf.to_owned();
+                        buf.clear();
+                        match log_file.write(b.as_bytes()) {
+                            Ok(_) => {}
+                            Err(e) => panic!("could not write to chef.cur.out: {}", e),
+                        };
+                        match stdout.write(b.as_bytes()) {
+                            Ok(_) => {}
+                            Err(e) => panic!("could not write to stdout: {}", e),
+                        };
+                    }
+                    Err(e) => eprintln!("{}", e),
+                };
+            }
+        });
+
+        Ok(())
+    }
+
+    pub fn pump_stderr(&mut self) -> std::io::Result<()> {
+        let stderr_handle = match self.child.stderr.take() {
+            Some(s) => s,
+            None => panic!("no handle to stdout :("),
+        };
+        let mut stderr = std::io::stderr();
+        let mut buffered_stderr = BufReader::new(stderr_handle);
+
+        // This thead will pump all of the data from the process' stdout
+        // handle into the log as well as the console.
+        std::thread::spawn(move || {
+            stderr.lock();
+            let mut log_file = match OpenOptions::new()
+                .append(true)
+                .create(false)
+                .open(crate::platform::CHEF_RUN_CURRENT_PATH)
+            {
+                Ok(h) => h,
+                Err(e) => panic!("error: {}", e),
+            };
+            let mut buf = String::new();
+
+            loop {
+                match buffered_stderr.read_line(&mut buf) {
+                    Ok(_) => {
+                        let b = buf.to_owned();
+                        buf.clear();
+                        match log_file.write(b.as_bytes()) {
+                            Ok(_) => {}
+                            Err(e) => panic!("could not write to chef.cur.out: {}", e),
+                        };
+                        match stderr.write(b.as_bytes()) {
+                            Ok(_) => {}
+                            Err(e) => panic!("could not write to stdout: {}", e),
+                        };
+                    }
+                    Err(e) => eprintln!("{}", e),
+                };
+            }
+        });
+
+        Ok(())
+    }
+
+    pub fn run(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.child.try_wait()
+    }
+}
+
+impl From<StateMachine<Running>> for StateMachine<PostRun> {
+    fn from(mut val: StateMachine<Running>) -> StateMachine<PostRun> {
+        let _ = val.state.pump_stdout();
+        let _ = val.state.pump_stderr();
+
+        loop {
+            if let Ok(s) = val.state.run() {
+                if let Some(exit_status) = s {
+                    // let _ = APP_STATE.update_process_state(&mut transition);
+
+                    return StateMachine {
+                        state: PostRun { exit_status },
+                    };
+                }
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct PostRun {
+    exit_status: std::process::ExitStatus,
+}
+
+impl PostRun {
+    fn new(exit_status: std::process::ExitStatus) -> Self {
+        Self { exit_status }
     }
 }
 
