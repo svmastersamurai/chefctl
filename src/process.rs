@@ -7,13 +7,11 @@ use chrono::prelude::{DateTime, Datelike, Local, Timelike};
 use rand::{thread_rng, Rng};
 use std::{
     cell::RefCell,
-    fmt::Display,
-    fs::OpenOptions,
-    io::{BufRead, BufReader, Write},
-    ops::DerefMut,
+    fs::{File, OpenOptions},
+    io::{BufRead, BufReader, Write, stderr, stdout},
     path::PathBuf,
-    process::{Command, Stdio},
-    rc::Rc,
+    process::{Child, Command, ExitStatus, Stdio},
+    thread::sleep,
     time::Duration,
 };
 
@@ -73,6 +71,41 @@ pub fn splay(max: u32) -> Duration {
     Duration::from_secs(thread_rng().gen_range(0, max).into())
 }
 
+fn pump<'a>(
+    path: String,
+    mut opts: &'a mut OpenOptions,
+    reader: &'a mut BufRead,
+    writer: &'a mut Write,
+) {
+    let mut log_file = open_log(path, &mut opts);
+    let mut buf = String::new();
+
+    loop {
+        match reader.read_line(&mut buf) {
+            Ok(_) => {
+                let b = buf.to_owned();
+                buf.clear();
+                match log_file.write(b.as_bytes()) {
+                    Ok(_) => {}
+                    Err(e) => panic!("could not write to chef.cur.out: {}", e),
+                };
+                match writer.write(b.as_bytes()) {
+                    Ok(_) => {}
+                    Err(e) => panic!("could not write to stdout: {}", e),
+                };
+            }
+            Err(e) => eprintln!("{}", e),
+        };
+    }
+}
+
+fn open_log(path: String, opts: &mut OpenOptions) -> File {
+    match opts.open(path) {
+        Ok(h) => h,
+        Err(e) => panic!("error: {}", e),
+    }
+}
+
 #[derive(Debug, Default)]
 // A simple struct for constructing the command line arguments passed into the
 // local installation of `chef-client`.
@@ -111,7 +144,7 @@ where
 // Represents a handle to the chef process to-be-launched on the client.
 pub struct ChefProcess {
     inner: RefCell<Box<Command>>,
-    child: Option<Result<RefCell<std::process::Child>, std::process::ExitStatus>>,
+    child: Option<Result<RefCell<Child>, ExitStatus>>,
 }
 
 impl ChefProcess {
@@ -134,7 +167,6 @@ impl ChefProcess {
     }
 }
 
-#[derive(Debug)]
 // Represents the state of the chef process:
 //      PreRun  - Initial State, only creates an empty `Command`.
 //      Waiting - Pausing execution for the `splay` value returned between a user
@@ -142,6 +174,7 @@ impl ChefProcess {
 //      Running - The `chef-client` process is executed. Logs are piped to disk.
 //      PostRun - `chef-client` has finished execution and will bubble up the
 //                exit code.
+#[derive(Debug)]
 pub struct StateMachine<S> {
     state: S,
 }
@@ -170,7 +203,6 @@ impl PreRun {
 
 impl From<StateMachine<PreRun>> for StateMachine<Waiting> {
     fn from(val: StateMachine<PreRun>) -> StateMachine<Waiting> {
-        println!("chef pre-run");
         let chef_cur_out = &String::from(CHEF_RUN_CURRENT_PATH);
         let chef_prev_out = &String::from(CHEF_RUN_LAST_PATH);
         let prev_path = match std::fs::read_link(CHEF_RUN_CURRENT_PATH) {
@@ -209,7 +241,7 @@ impl Waiting {
         Self { process, splay }
     }
 
-    pub fn spawn(&mut self) -> std::process::Child {
+    pub fn spawn(&mut self) -> Child {
         self.process.inner.borrow_mut().spawn().unwrap()
     }
 }
@@ -222,7 +254,7 @@ impl From<StateMachine<Waiting>> for StateMachine<Running> {
             .name("ticker-tx".into())
             .spawn(move || loop {
                 let _ = tx.send(1);
-                std::thread::sleep(one_sec);
+                sleep(one_sec);
             });
 
         let mut countdown = val.state.splay.as_secs();
@@ -233,7 +265,7 @@ impl From<StateMachine<Waiting>> for StateMachine<Running> {
             } else {
                 break;
             }
-            std::thread::sleep(one_sec);
+            sleep(one_sec);
         }
 
         APP_STATE.update_process_state("running".into());
@@ -247,103 +279,57 @@ impl From<StateMachine<Waiting>> for StateMachine<Running> {
 
 #[derive(Debug)]
 pub struct Running {
-    child: std::process::Child,
+    child: Child,
 }
 
 impl Running {
-    fn new(child: std::process::Child) -> Self {
+    fn new(child: Child) -> Self {
         Self { child }
     }
 
     pub fn pump_stdout(&mut self) -> std::io::Result<()> {
+        let mut opts = OpenOptions::new();
+        opts.append(true);
+        opts.create(true);
+
         let stdout_handle = match self.child.stdout.take() {
             Some(s) => s,
             None => panic!("no handle to stdout :("),
         };
-        let mut stdout = std::io::stdout();
-        let mut buffered_stdout = BufReader::new(stdout_handle);
+        let mut writer = stdout();
+        let mut reader = BufReader::new(stdout_handle);
+        let path: String = crate::platform::CHEF_RUN_CURRENT_PATH.into();
 
-        // This thead will pump all of the data from the process' stdout
-        // handle into the log as well as the console.
         std::thread::spawn(move || {
-            stdout.lock();
-            let mut log_file = match OpenOptions::new()
-                .append(true)
-                .create(true)
-                .open(crate::platform::CHEF_RUN_CURRENT_PATH)
-            {
-                Ok(h) => h,
-                Err(e) => panic!("error: {}", e),
-            };
-            let mut buf = String::new();
-
-            loop {
-                match buffered_stdout.read_line(&mut buf) {
-                    Ok(_) => {
-                        let b = buf.to_owned();
-                        buf.clear();
-                        match log_file.write(b.as_bytes()) {
-                            Ok(_) => {}
-                            Err(e) => panic!("could not write to chef.cur.out: {}", e),
-                        };
-                        match stdout.write(b.as_bytes()) {
-                            Ok(_) => {}
-                            Err(e) => panic!("could not write to stdout: {}", e),
-                        };
-                    }
-                    Err(e) => eprintln!("{}", e),
-                };
-            }
+            writer.lock();
+            pump(path, &mut opts, &mut reader, &mut writer);
         });
 
         Ok(())
     }
 
     pub fn pump_stderr(&mut self) -> std::io::Result<()> {
+        let mut opts = OpenOptions::new();
+        opts.append(true);
+        opts.create(false);
+
         let stderr_handle = match self.child.stderr.take() {
             Some(s) => s,
-            None => panic!("no handle to stdout :("),
+            None => panic!("no handle to stderr :("),
         };
-        let mut stderr = std::io::stderr();
-        let mut buffered_stderr = BufReader::new(stderr_handle);
+        let mut writer = stderr();
+        let mut reader = BufReader::new(stderr_handle);
+        let path: String = crate::platform::CHEF_RUN_CURRENT_PATH.into();
 
-        // This thead will pump all of the data from the process' stdout
-        // handle into the log as well as the console.
         std::thread::spawn(move || {
-            stderr.lock();
-            let mut log_file = match OpenOptions::new()
-                .append(true)
-                .create(false)
-                .open(crate::platform::CHEF_RUN_CURRENT_PATH)
-            {
-                Ok(h) => h,
-                Err(e) => panic!("error: {}", e),
-            };
-            let mut buf = String::new();
-
-            loop {
-                match buffered_stderr.read_line(&mut buf) {
-                    Ok(_) => {
-                        let b = buf.to_owned();
-                        buf.clear();
-                        match log_file.write(b.as_bytes()) {
-                            Ok(_) => {}
-                            Err(e) => panic!("could not write to chef.cur.out: {}", e),
-                        };
-                        match stderr.write(b.as_bytes()) {
-                            Ok(_) => {}
-                            Err(e) => panic!("could not write to stdout: {}", e),
-                        };
-                    }
-                    Err(e) => eprintln!("{}", e),
-                };
-            }
+            writer.lock();
+            pump(path, &mut opts, &mut reader, &mut writer);
         });
 
         Ok(())
     }
 
-    pub fn run(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+    pub fn run(&mut self) -> std::io::Result<Option<ExitStatus>> {
         self.child.try_wait()
     }
 }
@@ -356,24 +342,25 @@ impl From<StateMachine<Running>> for StateMachine<PostRun> {
         loop {
             if let Ok(s) = val.state.run() {
                 if let Some(exit_status) = s {
-                    let _ = APP_STATE.update_process_state("post-run".into());
+                    APP_STATE.update_process_state("post-run".into());
+
                     return StateMachine {
                         state: PostRun { exit_status },
                     };
                 }
             }
-            std::thread::sleep(Duration::from_millis(500));
+            sleep(Duration::from_millis(500));
         }
     }
 }
 
 #[derive(Debug)]
 pub struct PostRun {
-    exit_status: std::process::ExitStatus,
+    exit_status: ExitStatus,
 }
 
 impl PostRun {
-    fn new(exit_status: std::process::ExitStatus) -> Self {
+    fn new(exit_status: ExitStatus) -> Self {
         Self { exit_status }
     }
 }

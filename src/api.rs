@@ -1,5 +1,4 @@
 use actix_web::{server, HttpRequest};
-use serde_json::Error;
 
 pub fn start_api_server(addr: &str) -> std::io::Result<()> {
     server::new(|| actix_web::App::new().resource("/", |r| r.f(index)))
@@ -19,5 +18,5 @@ pub fn index(_req: &HttpRequest) -> String {
         }
     };
 
-    format!("{}\n", state_json).to_string();
+    format!("{}\n", state_json).to_string()
 }

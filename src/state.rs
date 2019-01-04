@@ -1,6 +1,3 @@
-use std::fmt::Display;
-use std::io::Error;
-use std::ops::DerefMut;
 use std::sync::RwLock;
 
 // Struct used to represent the global state of the application. This has to
