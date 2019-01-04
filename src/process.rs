@@ -62,6 +62,18 @@ pub fn output_path() -> String {
         None => panic!("wtf"),
     }
 }
+
+lazy_static! {
+    // Subsequent calls to `output_path()` will create new timestamps, so we need to
+    // create a lazily initialized filename that is consistent across the entire run
+    // of the application.
+    pub static ref LOG_FILE_PATH: String = {
+        let p = String::from(output_path());
+
+        p
+    };
+}
+
 // A simple splay from the thread local random number generator.
 // Since we're barely using the `rand` crate we can use other random number
 // generators if we need to that have different types of distributions.
@@ -69,13 +81,8 @@ pub fn splay(max: u32) -> Duration {
     Duration::from_secs(thread_rng().gen_range(0, max).into())
 }
 
-fn pump<'a>(
-    path: String,
-    mut opts: &'a mut OpenOptions,
-    reader: &'a mut BufRead,
-    writer: &'a mut Write,
-) {
-    let mut log_file = open_log(path, &mut opts);
+fn pump<'a>(mut opts: &'a mut OpenOptions, reader: &'a mut BufRead, writer: &'a mut Write) {
+    let mut log_file = open_log(LOG_FILE_PATH.to_string(), &mut opts);
     let mut buf = String::with_capacity(BUFFER_CAPACITY);
 
     loop {
@@ -159,6 +166,13 @@ impl ChefProcess {
         cmd_line.stdout(Stdio::piped());
         cmd_line.stderr(Stdio::piped());
 
+        // Create the log file ahead of time so that we can open it in
+        // append mode later.
+        match File::create(PathBuf::from(&*LOG_FILE_PATH)) {
+            Ok(_) => {}
+            Err(e) => panic!("could not create \"{}\": {}", &*LOG_FILE_PATH, e),
+        }
+
         let inner = RefCell::new(Box::new(cmd_line));
 
         println!("created process: {}", cmd);
@@ -217,7 +231,7 @@ impl From<StateMachine<PreRun>> for StateMachine<Waiting> {
                 let _ = create_symlink(chef_prev_out, update_symlink);
             }
         }
-        let _ = create_symlink(chef_cur_out, &output_path());
+        let _ = create_symlink(chef_cur_out, &LOG_FILE_PATH);
         let duration = splay(10);
 
         APP_STATE.update_process_state("waiting".into());
@@ -290,7 +304,7 @@ impl Running {
     pub fn pump_stdout(&mut self) -> std::io::Result<()> {
         let mut opts = OpenOptions::new();
         opts.append(true);
-        opts.create(true);
+        opts.create(false);
 
         let stdout_handle = match self.child.stdout.take() {
             Some(s) => s,
@@ -298,11 +312,10 @@ impl Running {
         };
         let mut writer = stdout();
         let mut reader = BufReader::new(stdout_handle);
-        let path = output_path();
 
         std::thread::spawn(move || {
             writer.lock();
-            pump(path, &mut opts, &mut reader, &mut writer);
+            pump(&mut opts, &mut reader, &mut writer);
         });
 
         Ok(())
@@ -319,11 +332,10 @@ impl Running {
         };
         let mut writer = stderr();
         let mut reader = BufReader::new(stderr_handle);
-        let path = output_path();
 
         std::thread::spawn(move || {
             writer.lock();
-            pump(path, &mut opts, &mut reader, &mut writer);
+            pump(&mut opts, &mut reader, &mut writer);
         });
 
         Ok(())
