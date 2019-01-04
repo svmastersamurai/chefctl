@@ -7,7 +7,7 @@ extern crate ctrlc;
 
 use chefctl::{
     api::start_api_server,
-    platform::{CONFIG_FILE_PATH, LOCK_FILE_PATH},
+    platform::{CONFIG_FILE_PATH, FD_NULL, LOCK_FILE_PATH},
     process::{ChefClientArgs, PostRun, PreRun, Running, Waiting},
     VERSION,
 };
@@ -67,9 +67,7 @@ fn args_from_clap(matches: clap::ArgMatches) -> String {
 
     opts.insert("--no-fork");
     opts.insert("--force-formatter");
-
-    // For some reason chef-client still double logs and I have to do this :(
-    opts.insert("-L /dev/null");
+    opts.insert(&format!("-L {}", FD_NULL));
 
     opts.into()
 }

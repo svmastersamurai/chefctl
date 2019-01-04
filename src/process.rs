@@ -8,12 +8,14 @@ use rand::{thread_rng, Rng};
 use std::{
     cell::RefCell,
     fs::{File, OpenOptions},
-    io::{BufRead, BufReader, Write, stderr, stdout},
+    io::{stderr, stdout, BufRead, BufReader, Write},
     path::PathBuf,
     process::{Child, Command, ExitStatus, Stdio},
     thread::sleep,
     time::Duration,
 };
+
+const BUFFER_CAPACITY: usize = 4096;
 
 fn timestamp() -> String {
     let now: DateTime<Local> = Local::now();
@@ -36,18 +38,14 @@ fn chef_run_log_path() -> String {
 #[cfg(target_os = "windows")]
 pub fn output_path() -> String {
     let file_name = chef_run_log_path();
-    let mut p = PathBuf::new();
+    let p: PathBuf = ["C:\\", "chef", "outputs", file_name.as_str()]
+        .iter()
+        .collect();
 
-    match std::env::var("SYSTEMROOT") {
-        Ok(r) => p.push(r),
-        Err(e) => p.push("C:"),
+    match p.to_str() {
+        Some(p) => p.to_owned(),
+        None => panic!("wtf"),
     }
-
-    vec!["chef", "outputs", file_name.as_str()]
-        .into_iter()
-        .map(|s| p.push(s));
-
-    p.into()
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -78,7 +76,7 @@ fn pump<'a>(
     writer: &'a mut Write,
 ) {
     let mut log_file = open_log(path, &mut opts);
-    let mut buf = String::new();
+    let mut buf = String::with_capacity(BUFFER_CAPACITY);
 
     loop {
         match reader.read_line(&mut buf) {
@@ -100,9 +98,9 @@ fn pump<'a>(
 }
 
 fn open_log(path: String, opts: &mut OpenOptions) -> File {
-    match opts.open(path) {
+    match opts.open(&path) {
         Ok(h) => h,
-        Err(e) => panic!("error: {}", e),
+        Err(e) => panic!("error opening \"{}\": {}", path, e),
     }
 }
 
@@ -162,6 +160,8 @@ impl ChefProcess {
         cmd_line.stderr(Stdio::piped());
 
         let inner = RefCell::new(Box::new(cmd_line));
+
+        println!("created process: {}", cmd);
 
         Self { inner, child: None }
     }
@@ -298,7 +298,7 @@ impl Running {
         };
         let mut writer = stdout();
         let mut reader = BufReader::new(stdout_handle);
-        let path: String = crate::platform::CHEF_RUN_CURRENT_PATH.into();
+        let path = output_path();
 
         std::thread::spawn(move || {
             writer.lock();
@@ -319,7 +319,7 @@ impl Running {
         };
         let mut writer = stderr();
         let mut reader = BufReader::new(stderr_handle);
-        let path: String = crate::platform::CHEF_RUN_CURRENT_PATH.into();
+        let path = output_path();
 
         std::thread::spawn(move || {
             writer.lock();
