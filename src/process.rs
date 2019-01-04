@@ -162,6 +162,8 @@ pub struct PreRun {
 impl PreRun {
     fn new(val: String) -> Self {
         let process = ChefProcess::new(val);
+        APP_STATE.update_process_state("pre-run".into());
+
         Self { process }
     }
 }
@@ -186,6 +188,7 @@ impl From<StateMachine<PreRun>> for StateMachine<Waiting> {
         let _ = create_symlink(chef_cur_out, &output_path());
         let duration = splay(10);
 
+        APP_STATE.update_process_state("waiting".into());
         StateMachine {
             state: Waiting {
                 process: val.state.process,
@@ -233,6 +236,7 @@ impl From<StateMachine<Waiting>> for StateMachine<Running> {
             std::thread::sleep(one_sec);
         }
 
+        APP_STATE.update_process_state("running".into());
         StateMachine {
             state: Running {
                 child: val.state.spawn(),
@@ -352,8 +356,7 @@ impl From<StateMachine<Running>> for StateMachine<PostRun> {
         loop {
             if let Ok(s) = val.state.run() {
                 if let Some(exit_status) = s {
-                    // let _ = APP_STATE.update_process_state(&mut transition);
-
+                    let _ = APP_STATE.update_process_state("post-run".into());
                     return StateMachine {
                         state: PostRun { exit_status },
                     };

@@ -1,6 +1,5 @@
-extern crate actix_web;
-
 use actix_web::{server, HttpRequest};
+use serde_json::Error;
 
 pub fn start_api_server(addr: &str) -> std::io::Result<()> {
     server::new(|| actix_web::App::new().resource("/", |r| r.f(index)))
@@ -11,5 +10,14 @@ pub fn start_api_server(addr: &str) -> std::io::Result<()> {
 }
 
 pub fn index(_req: &HttpRequest) -> String {
-    format!("{:?}\n", &*crate::state::APP_STATE).to_string()
+    let state_json = match serde_json::to_string_pretty(&*crate::state::APP_STATE) {
+        Ok(v) => v,
+        Err(e) => {
+            println!("error serializing state: {}", e);
+
+            "{\"error\": \"serialization error!\"}".into()
+        }
+    };
+
+    format!("{}\n", state_json).to_string();
 }

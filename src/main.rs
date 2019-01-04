@@ -153,7 +153,7 @@ fn main() -> Result<(), std::io::Error> {
     );
 
     // Run the state machine.
-    let pre_run = chefctl::process::StateMachine::<PreRun>::new(args.into());
+    let pre_run = chefctl::process::StateMachine::<PreRun>::new(args);
     let waiting = chefctl::process::StateMachine::<Waiting>::from(pre_run);
     let running = chefctl::process::StateMachine::<Running>::from(waiting);
     let _done = chefctl::process::StateMachine::<PostRun>::from(running);
