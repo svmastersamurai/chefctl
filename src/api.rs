@@ -2,7 +2,6 @@ use actix_web::{server, HttpRequest};
 
 pub fn start_api_server(addr: &str) -> std::io::Result<()> {
     server::new(|| {
-        let _ = crate::health::update_health_checks();
         actix_web::App::new()
             .resource("/", |r| r.f(index))
             .resource("/health", |r| r.f(health))

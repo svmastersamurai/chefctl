@@ -7,14 +7,13 @@ extern crate ctrlc;
 
 use chefctl::{
     api::start_api_server,
-    platform::{CHEF_PATH, CONFIG_FILE_PATH, FD_NULL, LOCK_FILE_PATH},
+    platform::{CONFIG_FILE_PATH, FD_NULL, LOCK_FILE_PATH},
     process::{ChefClientArgs, PostRun, PreRun, Running, Waiting},
     VERSION,
 };
 use clap::Arg;
 use std::{
     collections::HashMap,
-    io::Read,
     sync::atomic::{AtomicBool, Ordering},
     sync::Arc,
 };
@@ -150,6 +149,9 @@ fn main() -> Result<(), std::io::Error> {
             )
             .get_matches(),
     );
+
+    // Should be moved to a worker thread but ok here for now.
+    std::thread::spawn(chefctl::health::update_health_checks);
 
     // Run the state machine.
     let pre_run = chefctl::process::StateMachine::<PreRun>::new(args);

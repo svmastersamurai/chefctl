@@ -2,6 +2,8 @@
 #[cfg(target_os = "windows")]
 pub const CHEF_PATH: &str = "C:\\opscode\\chef\\bin\\chef-client.bat";
 #[cfg(target_os = "windows")]
+pub const CHEF_VERSION_MANIFEST: &str = "C:\\opscode\\chef\\version-manifest.json";
+#[cfg(target_os = "windows")]
 pub const CONFIG_FILE_PATH: &str = "C:\\chef\\chefctl.yml";
 #[cfg(target_os = "windows")]
 pub const LOCK_FILE_PATH: &str = "C:\\chef\\chefctl.lock";
@@ -15,6 +17,8 @@ pub const FD_NULL: &str = "NUL";
 // Non-Windows file paths.
 #[cfg(not(target_os = "windows"))]
 pub const CHEF_PATH: &str = "/opt/chef/embedded/bin/chef-client";
+#[cfg(not(target_os = "windows"))]
+pub const CHEF_VERSION_MANIFEST: &str = "/opt/chef/version-manifest.json";
 #[cfg(not(target_os = "windows"))]
 pub const CONFIG_FILE_PATH: &str = "/etc/chefctl.yml";
 #[cfg(not(target_os = "windows"))]

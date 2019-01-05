@@ -1,7 +1,25 @@
-use serde::ser::{Serialize, SerializeStruct, Serializer};
-use std::{io::Read, sync::RwLock};
+use crate::platform::CHEF_VERSION_MANIFEST;
+use serde::ser::Serialize;
+use std::{collections::HashMap, error::Error, io::Read, sync::RwLock};
 
+#[derive(Debug)]
 pub struct CheckError;
+
+impl std::fmt::Display for CheckError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "check error")
+    }
+}
+
+impl std::error::Error for CheckError {
+    fn cause(&self) -> Option<&std::error::Error> {
+        None
+    }
+
+    fn description(&self) -> &str {
+        "CheckError"
+    }
+}
 
 type CheckResult<T> = std::result::Result<T, CheckError>;
 
@@ -29,14 +47,14 @@ pub struct State<T>
 where
     T: Serialize + Eq + std::hash::Hash,
 {
-    checks: RwLock<std::collections::HashMap<T, T>>,
+    checks: RwLock<HashMap<T, T>>,
 }
 
 impl<T> State<T>
 where
     T: Serialize + Eq + std::hash::Hash,
 {
-    pub fn update_checks(&self, val: std::collections::HashMap<T, T>) {
+    pub fn update_checks(&self, val: HashMap<T, T>) {
         let mut current_val = self.checks.write().unwrap();
 
         *current_val = val;
@@ -49,7 +67,7 @@ unsafe impl<T> Sync for State<T> where T: Serialize + Eq + std::hash::Hash {}
 lazy_static! {
     pub static ref HEALTH_STATE: State<String> = {
         State {
-            checks: RwLock::new(std::collections::HashMap::new()),
+            checks: RwLock::new(HashMap::new()),
         }
     };
 }
@@ -58,7 +76,7 @@ struct VersionCheck;
 
 impl HealthCheck for VersionCheck {
     fn run() -> CheckResult<(String, String)> {
-        let mut manifest = std::fs::File::open("/opt/chef/version-manifest.json")?;
+        let mut manifest = std::fs::File::open(CHEF_VERSION_MANIFEST)?;
         let mut content = String::new();
         let _ = manifest.read_to_string(&mut content);
         let manifest: serde_json::Value = serde_json::from_str(&content)?;
@@ -75,10 +93,7 @@ impl HealthCheck for ChefClientCheck {
         let mut chef_version = std::process::Command::new(crate::platform::CHEF_PATH);
         chef_version.arg("--version");
         let status = chef_version.status()?;
-        let result = match status.success() {
-            true => "true",
-            false => "false",
-        };
+        let result = if status.success() { "true" } else { "false" };
 
         Ok((
             "Chef Client Executes Normally Check".to_string(),
@@ -88,11 +103,17 @@ impl HealthCheck for ChefClientCheck {
 }
 
 pub fn update_health_checks() -> CheckResult<()> {
-    let mut results: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    let result = VersionCheck::run()?;
+    let mut results: HashMap<String, String> = HashMap::new();
+    let result = match VersionCheck::run() {
+        Ok(v) => v,
+        Err(e) => ("VersionCheck".to_string(), e.description().to_owned()),
+    };
     results.insert(result.0, result.1);
 
-    let result = ChefClientCheck::run()?;
+    let result = match ChefClientCheck::run() {
+        Ok(v) => v,
+        Err(e) => ("ChefClientCheck".to_string(), e.description().to_owned()),
+    };
     results.insert(result.0, result.1);
 
     HEALTH_STATE.update_checks(results);
