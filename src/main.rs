@@ -7,13 +7,14 @@ extern crate ctrlc;
 
 use chefctl::{
     api::start_api_server,
-    platform::{CONFIG_FILE_PATH, FD_NULL, LOCK_FILE_PATH},
+    platform::{CHEF_PATH, CONFIG_FILE_PATH, FD_NULL, LOCK_FILE_PATH},
     process::{ChefClientArgs, PostRun, PreRun, Running, Waiting},
     VERSION,
 };
 use clap::Arg;
 use std::{
     collections::HashMap,
+    io::Read,
     sync::atomic::{AtomicBool, Ordering},
     sync::Arc,
 };
