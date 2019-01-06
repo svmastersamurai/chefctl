@@ -7,8 +7,8 @@ extern crate ctrlc;
 
 use chefctl::{
     api::start_api_server,
-    platform::{CONFIG_FILE_PATH, LOCK_FILE_PATH},
-    process::ChefClientArgs,
+    platform::{CONFIG_FILE_PATH, FD_NULL, LOCK_FILE_PATH},
+    process::{ChefClientArgs, PostRun, PreRun, Running, Waiting},
     VERSION,
 };
 use clap::Arg;
@@ -67,9 +67,7 @@ fn args_from_clap(matches: clap::ArgMatches) -> String {
 
     opts.insert("--no-fork");
     opts.insert("--force-formatter");
-
-    // For some reason chef-client still double logs and I have to do this :(
-    opts.insert("-L /dev/null");
+    opts.insert(&format!("-L {}", FD_NULL));
 
     opts.into()
 }
@@ -152,21 +150,11 @@ fn main() -> Result<(), std::io::Error> {
             .get_matches(),
     );
 
-    let mut state_machine = chefctl::process::create(args.clone());
-    loop {
-        state_machine = state_machine.run();
-        match state_machine {
-            chefctl::process::State::PostRun(e) => {
-                println!("chef process state completed with exit code {}", e);
-                break;
-            }
-            _ => {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                std::thread::yield_now();
-            }
-        };
-    }
-    println!("chefctl done");
+    // Run the state machine.
+    let pre_run = chefctl::process::StateMachine::<PreRun>::new(args);
+    let waiting = chefctl::process::StateMachine::<Waiting>::from(pre_run);
+    let running = chefctl::process::StateMachine::<Running>::from(waiting);
+    let ___done = chefctl::process::StateMachine::<PostRun>::from(running);
 
     Ok(())
 }
