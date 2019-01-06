@@ -150,6 +150,9 @@ fn main() -> Result<(), std::io::Error> {
             .get_matches(),
     );
 
+    // Should be moved to a worker thread but ok here for now.
+    std::thread::spawn(chefctl::health::update_health_checks);
+
     // Run the state machine.
     let pre_run = chefctl::process::StateMachine::<PreRun>::new(args);
     let waiting = chefctl::process::StateMachine::<Waiting>::from(pre_run);

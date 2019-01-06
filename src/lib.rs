@@ -11,6 +11,7 @@ extern crate lazy_static;
 extern crate serde_derive;
 
 pub mod api;
+pub mod health;
 pub mod platform;
 pub mod process;
 pub mod state;

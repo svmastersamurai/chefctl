@@ -67,11 +67,7 @@ lazy_static! {
     // Subsequent calls to `output_path()` will create new timestamps, so we need to
     // create a lazily initialized filename that is consistent across the entire run
     // of the application.
-    pub static ref LOG_FILE_PATH: String = {
-        let p = String::from(output_path());
-
-        p
-    };
+    pub static ref LOG_FILE_PATH: String = { output_path() };
 }
 
 // A simple splay from the thread local random number generator.
