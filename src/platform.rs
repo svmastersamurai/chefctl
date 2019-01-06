@@ -20,4 +20,6 @@ pub const LOCK_FILE_PATH: &str = "/var/lock/subsys/chefctl";
 #[cfg(not(target_os = "windows"))]
 pub const CHEF_RUN_CURRENT_PATH: &str = "/tmp/chef.cur.out";
 #[cfg(not(target_os = "windows"))]
-pub const CHEF_RUN_LAST_PATH: &str = "/var/chef/outputs/chef.last.out";
+pub const CHEF_RUN_LAST_PATH: &str = "/tmp/chef.last.out";
+// #[cfg(not(target_os = "windows"))]
+// pub const CHEF_RUN_LAST_PATH: &str = "/var/chef/outputs/chef.last.out";
